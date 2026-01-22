@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create addon zip
+        run: |
+          mkdir -p PoisonCheck
+          cp PoisonCheck.toc PoisonCheck.lua README.md PoisonCheck/
+          zip -r PoisonCheck-${{ steps.version.outputs.version }}.zip PoisonCheck
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PoisonCheck-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
