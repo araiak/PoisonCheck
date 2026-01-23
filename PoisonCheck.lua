@@ -336,9 +336,21 @@ local function HandleSlashCommand(msg)
         print("  /pc sound - Toggle sound alerts")
         print("  /pc check - Force a poison check now")
         print("  /pc debug - Scan buffs to find poison spell IDs")
+        if not isRogue then
+            print("")
+            print("|cff888888Note: You are not playing a Rogue. Alerts are disabled.|r")
+        end
     elseif cmd == "debug" then
+        if not isRogue then
+            print("|cff00ff00[PoisonCheck]|r |cff888888You are not playing a Rogue. This command is only useful for Rogues.|r")
+            return
+        end
         ScanPlayerBuffs()
     elseif cmd == "status" then
+        if not isRogue then
+            print("|cff00ff00[PoisonCheck]|r |cff888888You are not playing a Rogue. Alerts are disabled.|r")
+            return
+        end
         local info = GetMissingPoisonInfo()
         print("|cff00ff00[PoisonCheck] Status:|r")
         print(string.format("  Dragon-Tempered Blades: %s", info.hasDTB and "|cff00ff00Yes|r" or "|cffff0000No|r"))
@@ -368,6 +380,10 @@ local function HandleSlashCommand(msg)
         print(string.format("|cff00ff00[PoisonCheck]|r Sound alerts %s",
             PoisonCheckDB.alertSound and "|cff00ff00enabled|r" or "|cffff0000disabled|r"))
     elseif cmd == "check" then
+        if not isRogue then
+            print("|cff00ff00[PoisonCheck]|r |cff888888You are not playing a Rogue. Alerts are disabled.|r")
+            return
+        end
         lastAlertTime = 0 -- Reset cooldown for manual check
         CheckPoisons(true, true) -- Also check durations on manual check
         local info = GetMissingPoisonInfo()
