@@ -37,6 +37,25 @@ local C_UnitAuras = C_UnitAuras
 local IsPlayerSpell = IsPlayerSpell
 local GetTime = GetTime
 
+-- Safely get spellId from aura (handles "secret" aura data)
+-- Test table for validating spellId can be used as index
+local spellIdTestTable = {}
+local function SafeGetSpellId(aura)
+    if not aura then return nil end
+    -- Try to access and use the spellId as a table index
+    local ok, result = pcall(function()
+        local id = aura.spellId
+        if id then
+            -- Test that we can actually use it as a table key
+            local _ = spellIdTestTable[id]
+            return id
+        end
+        return nil
+    end)
+    if ok then return result end
+    return nil
+end
+
 -- Addon state
 local isRogue = false
 local lastAlertTime = 0
@@ -85,9 +104,10 @@ local function CountActivePoisons(poisonTable)
             local aura = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
             if not aura then break end
 
-            if aura.spellId and poisonTable[aura.spellId] then
-                if not found[aura.spellId] then
-                    found[aura.spellId] = true
+            local spellId = SafeGetSpellId(aura)
+            if spellId and poisonTable[spellId] then
+                if not found[spellId] then
+                    found[spellId] = true
                     count = count + 1
 
                     -- Track duration (expirationTime is absolute time, subtract GetTime for remaining)
@@ -95,7 +115,7 @@ local function CountActivePoisons(poisonTable)
                         local remaining = aura.expirationTime - GetTime()
                         if remaining > 0 and (minDuration == nil or remaining < minDuration) then
                             minDuration = remaining
-                            minDurationName = aura.name or poisonTable[aura.spellId]
+                            minDurationName = aura.name or poisonTable[spellId]
                         end
                     end
                 end
@@ -260,7 +280,8 @@ local function IsPoisonAuraUpdate(updateInfo)
     -- Check added auras
     if updateInfo.addedAuras then
         for _, aura in ipairs(updateInfo.addedAuras) do
-            if aura.spellId and (LETHAL_POISONS[aura.spellId] or NON_LETHAL_POISONS[aura.spellId]) then
+            local spellId = SafeGetSpellId(aura)
+            if spellId and (LETHAL_POISONS[spellId] or NON_LETHAL_POISONS[spellId]) then
                 return true
             end
         end
@@ -293,7 +314,7 @@ local function ScanPlayerBuffs()
         if not aura then break end
 
         local name = aura.name or "Unknown"
-        local spellId = aura.spellId or 0
+        local spellId = SafeGetSpellId(aura) or 0
         local lowerName = name:lower()
 
         -- Check if it looks like a poison
@@ -425,7 +446,8 @@ local function OnEvent(self, event, ...)
 
     elseif event == "UNIT_AURA" then
         local unit, updateInfo = ...
-        if unit == "player" and isRogue then
+        -- Skip during combat to avoid "secret" aura data errors
+        if unit == "player" and isRogue and not InCombatLockdown() then
             -- Only process if this update might involve poisons
             if IsPoisonAuraUpdate(updateInfo) then
                 CheckPoisons(false)
