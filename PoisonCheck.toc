@@ -2,7 +2,7 @@
 ## Title: PoisonCheck
 ## Notes: Alerts rogues when missing lethal or non-lethal poisons. Supports Dragon-Tempered Blades.
 ## Author: Araiak
-## Version: 1.0.2
+## Version: 1.0.3
 ## SavedVariables: PoisonCheckDB
 
 PoisonCheck.lua
