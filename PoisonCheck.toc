@@ -1,4 +1,4 @@
-## Interface: 120005
+## Interface: 120005, 120007
 ## Title: PoisonCheck
 ## Notes: Alerts rogues when missing lethal or non-lethal poisons. Supports Dragon-Tempered Blades.
 ## Author: Araiak
