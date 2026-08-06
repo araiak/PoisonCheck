@@ -32,7 +32,6 @@ for id, name in pairs(NON_LETHAL_POISONS) do ALL_KNOWN_POISONS[id] = name end
 
 -- Local references for performance
 local UnitClass = UnitClass
-local UnitBuff = UnitBuff
 local C_UnitAuras = C_UnitAuras
 local IsPlayerSpell = IsPlayerSpell
 local GetTime = GetTime
@@ -60,6 +59,8 @@ end
 local isRogue = false
 local lastAlertTime = 0
 local ALERT_COOLDOWN = 5 -- seconds between alerts
+local lastAuraCheck = 0
+local AURA_CHECK_THROTTLE = 0.3 -- seconds; only applied while in combat
 local lastPoisonState = { lethal = 0, nonLethal = 0 } -- Track poison counts to detect changes
 
 -- Frame for events
@@ -84,68 +85,54 @@ local function InitializeDB()
     end
 end
 
--- Check if player has Dragon-Tempered Blades talent
-local function HasDragonTemperedBlades()
-    return IsPlayerSpell(DRAGON_TEMPERED_BLADES_SPELL_ID)
+-- Dragon-Tempered Blades is a talent, and talents cannot change in combat. Cache it on
+-- spell/talent updates so the in-combat alert path never calls IsPlayerSpell -- whose
+-- return would be a boolean test, which errors if it ever comes back secret.
+local cachedDTB = false
+local function RefreshDTB()
+    if InCombatLockdown() then return end
+    cachedDTB = IsPlayerSpell(DRAGON_TEMPERED_BLADES_SPELL_ID) and true or false
 end
 
--- Count active poisons of a specific type using AuraUtil
--- Returns: count, found table, minimum remaining duration (seconds), name of lowest duration poison
+local function HasDragonTemperedBlades()
+    return cachedDTB
+end
+
+-- Count active poisons of a specific type
+-- Returns: count, minimum remaining duration (seconds), name of lowest duration poison
+--
+-- 12.1: index-based aura APIs (GetAuraDataByIndex, UnitBuff) Lua error while auras are
+-- secret -- which now covers encounters, M+ and PvP, not just combat lockdown. Spell-ID
+-- lookup stays callable and poison buffs are non-secret (verified on PTR), so query the
+-- IDs we already know instead of walking the whole aura list.
 local function CountActivePoisons(poisonTable)
     local count = 0
-    local found = {}
     local minDuration = nil
     local minDurationName = nil
 
-    -- Iterate through player buffs using modern aura API
-    if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-        local i = 1
-        while true do
-            local aura = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
-            if not aura then break end
+    for spellId, name in pairs(poisonTable) do
+        local aura = C_UnitAuras.GetPlayerAuraBySpellID(spellId)
+        if aura then
+            count = count + 1
 
-            local spellId = SafeGetSpellId(aura)
-            if spellId and poisonTable[spellId] then
-                if not found[spellId] then
-                    found[spellId] = true
-                    count = count + 1
-
-                    -- Track duration (expirationTime is absolute time, subtract GetTime for remaining)
-                    if aura.expirationTime and aura.expirationTime > 0 then
-                        local remaining = aura.expirationTime - GetTime()
-                        if remaining > 0 and (minDuration == nil or remaining < minDuration) then
-                            minDuration = remaining
-                            minDurationName = aura.name or poisonTable[spellId]
-                        end
-                    end
-                end
-            end
-            i = i + 1
-        end
-    else
-        -- Fallback for older API (no duration tracking)
-        for spellId, name in pairs(poisonTable) do
-            local auraName = GetSpellInfo(spellId)
-            if auraName then
-                for i = 1, 40 do
-                    local buffName = UnitBuff("player", i)
-                    if not buffName then break end
-                    if buffName == auraName then
-                        count = count + 1
-                        break
-                    end
+            -- expirationTime is absolute; subtract GetTime for remaining
+            if aura.expirationTime and aura.expirationTime > 0 then
+                local remaining = aura.expirationTime - GetTime()
+                if remaining > 0 and (minDuration == nil or remaining < minDuration) then
+                    minDuration = remaining
+                    minDurationName = aura.name or name
                 end
             end
         end
     end
 
-    return count, found, minDuration, minDurationName
+    return count, minDuration, minDurationName
 end
 
 -- Get names of missing poison types and duration info
 local function GetMissingPoisonInfo()
-    local lethalCount, lethalFound, lethalMinDur, lethalMinName = CountActivePoisons(LETHAL_POISONS)
-    local nonLethalCount, nonLethalFound, nonLethalMinDur, nonLethalMinName = CountActivePoisons(NON_LETHAL_POISONS)
+    local lethalCount, lethalMinDur, lethalMinName = CountActivePoisons(LETHAL_POISONS)
+    local nonLethalCount, nonLethalMinDur, nonLethalMinName = CountActivePoisons(NON_LETHAL_POISONS)
 
     local hasDTB = HasDragonTemperedBlades()
     local requiredLethal = hasDTB and 2 or 1
@@ -252,9 +239,9 @@ end
 local function CheckPoisons(forceAlert, checkDurations)
     if not isRogue or not PoisonCheckDB.enabled then return end
 
-    -- Midnight (12.0): Addons cannot run during combat
-    if InCombatLockdown() then return end
-
+    -- Runs in combat: poison counting is spell-ID lookups on non-secret auras, and the
+    -- DTB talent is cached, so nothing on this path is combat-restricted. Losing a poison
+    -- mid-fight is exactly when you want to hear about it.
     local info = GetMissingPoisonInfo()
 
     -- Only alert if state changed (poison fell off) or forced
@@ -273,35 +260,6 @@ local function CheckPoisons(forceAlert, checkDurations)
     end
 end
 
--- Check if an aura update contains poison-related changes
-local function IsPoisonAuraUpdate(updateInfo)
-    if not updateInfo then return false end
-
-    -- Check added auras
-    if updateInfo.addedAuras then
-        for _, aura in ipairs(updateInfo.addedAuras) do
-            local spellId = SafeGetSpellId(aura)
-            if spellId and (LETHAL_POISONS[spellId] or NON_LETHAL_POISONS[spellId]) then
-                return true
-            end
-        end
-    end
-
-    -- Check updated auras
-    if updateInfo.updatedAuraInstanceIDs then
-        -- An update occurred, could be poison duration refresh
-        return true
-    end
-
-    -- Check removed auras - this is the critical one (poison fell off)
-    if updateInfo.removedAuraInstanceIDs and #updateInfo.removedAuraInstanceIDs > 0 then
-        -- We can't know what was removed by ID alone, so trigger a check
-        return true
-    end
-
-    return false
-end
-
 -- Debug: scan all player buffs to find poison spell IDs
 local function ScanPlayerBuffs()
     print("|cff00ff00[PoisonCheck] Scanning all player buffs:|r")
@@ -310,7 +268,15 @@ local function ScanPlayerBuffs()
     local i = 1
     local foundAny = false
     while true do
-        local aura = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
+        -- Discovering *unknown* poison IDs needs the full aura list, so there is no
+        -- spell-ID equivalent for this one. 12.1 errors on index access while auras are
+        -- secret, so degrade with an explanation instead of throwing.
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HELPFUL")
+        if not ok then
+            print("  |cffff0000Can't scan here - auras are restricted in combat, raids, M+ and PvP.|r")
+            print("  |cff888888Run /pc debug in the open world, out of combat.|r")
+            return
+        end
         if not aura then break end
 
         local name = aura.name or "Unknown"
@@ -440,16 +406,40 @@ local function OnEvent(self, event, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         if isRogue then
+            RefreshDTB()
             -- Delay check to allow buffs to load, force alert on login
             C_Timer.After(2, function() CheckPoisons(true) end)
         end
 
+    elseif event == "SPELLS_CHANGED" then
+        -- Talent swap: refresh the cached DTB state (no-op if it fires in combat)
+        if isRogue then
+            RefreshDTB()
+        end
+
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        local unit = ...
+        -- Spec swap changes whether DTB is talented, which changes how many poisons are
+        -- required -- but not how many are applied, so the count-based stateChanged test
+        -- would never fire. Delay for the spellbook to settle, then force a re-evaluation.
+        if unit == "player" and isRogue then
+            C_Timer.After(1, function()
+                RefreshDTB()
+                lastAlertTime = 0
+                CheckPoisons(true)
+            end)
+        end
+
     elseif event == "UNIT_AURA" then
-        local unit, updateInfo = ...
-        -- Skip during combat to avoid "secret" aura data errors
-        if unit == "player" and isRogue and not InCombatLockdown() then
-            -- Only process if this update might involve poisons
-            if IsPoisonAuraUpdate(updateInfo) then
+        local unit = ...
+        -- 12.1: the updateInfo payload is fully secret while auras are restricted, so it
+        -- can't be inspected to pre-filter as it was before. In combat UNIT_AURA fires
+        -- constantly (every proc, stack and bleed), so throttle there; out of combat
+        -- events are rare and every one is checked so a drop is never missed.
+        if unit == "player" and isRogue then
+            local now = GetTime()
+            if not InCombatLockdown() or (now - lastAuraCheck) >= AURA_CHECK_THROTTLE then
+                lastAuraCheck = now
                 CheckPoisons(false)
             end
         end
@@ -499,6 +489,8 @@ end
 frame:SetScript("OnEvent", OnEvent)
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+frame:RegisterEvent("SPELLS_CHANGED")
+frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 frame:RegisterEvent("UNIT_AURA")
 frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
