@@ -1,8 +1,8 @@
-## Interface: 120100
+## Interface: 120100, 120105
 ## Title: PoisonCheck
 ## Notes: Alerts rogues when missing lethal or non-lethal poisons. Supports Dragon-Tempered Blades.
 ## Author: Araiak
-## Version: 1.0.6
+## Version: 1.0.7
 ## SavedVariables: PoisonCheckDB
 
 PoisonCheck.lua
